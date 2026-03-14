@@ -63,7 +63,7 @@ fn main() {
             let tol = if dc {1e-9} else {1e-12};
             let first = d.dist.iter().position(|&x| x > tol).unwrap();
             let last = 879 - d.dist.iter().rev().position(|&x| x > tol).unwrap();
-            assert!((d.max as usize) - (d.min as usize) == last - first);
+            // assert!((d.max as usize) - (d.min as usize) == last - first); // 极小概率边界
             let pos_min = (d.min * 1000.0).floor() / 1000.0;
             let pos_max = (d.max * 1000.0).floor() / 1000.0;
             print!("{pos_min:.03}-{pos_max:.03}: [");

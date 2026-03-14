@@ -300,7 +300,7 @@ fn calculate_animation(data: &ZombieData, ice_times: &[i64], time: i64, animatio
                         let ratio_r = (min(Num::new(dx, 1), dx_max) - dx_min) / (dx_max - dx_min);
                         ratio_r - ratio_l
                     };
-                contrib[(data.spawn.1 - dx) as usize] += (weight * ratio).to_f64().unwrap();
+                contrib[(data.spawn.1 - dx) as usize] += weight.to_f64().unwrap() * ratio.to_f64().unwrap();
             }
         }
         (contrib, dx_global_min, dx_global_max)
