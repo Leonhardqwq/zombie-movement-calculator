@@ -41,24 +41,37 @@ fn calc_time(data: &ZombieData, ice_times: &[i64], time: i64) -> TimePlan {
     TimePlan {initial_norm_time, segments,}
 }
 
+// 对于一个冰段，返回 chill_time 和对应权重的列表
+fn get_segment_chill_states(seg: &IceSegment) -> Vec<(i64, Num)> {
+    let minimum_chill_multiplier: i64 = max(seg.freeze_span - seg.chill_time_max, 1);
+    let chill_time_min = max(seg.chill_time_max - seg.freeze_span + 1, 0);
+    let mut result = Vec::new();
+    for chill_time in chill_time_min..=seg.chill_time_max {
+        let chill_weight =
+            if seg.freeze_span == 1 {Num::new(1, 1)}
+            else {Num::new(if chill_time == chill_time_min {minimum_chill_multiplier} else {1}, seg.freeze_span)};
+        result.push((chill_time, chill_weight));
+    }
+    result
+}
 
+// 将目前状态与一个冰段卷积，得到冰段结束后的状态列表
+fn convolve_chill_states(base_states: &[(i64, Num)], seg: &IceSegment) -> Vec<(i64, Num)> {
+    let seg_states = get_segment_chill_states(seg);
+    let mut next_states: HashMap<i64, Num> = HashMap::new();
+    for (base_sum, base_weight) in base_states {
+        for (seg_sum, seg_weight) in &seg_states {
+            let entry = next_states.entry(*base_sum + *seg_sum).or_insert(Num::new(0, 1));
+            *entry += *base_weight * *seg_weight;
+        }
+    }
+    next_states.into_iter().collect()
+}
+
+// 将初始状态与多个冰段卷积，得到所有可能的总冰时间与对应权重
 fn get_total_chill_states(plan: &TimePlan) -> Vec<(i64, Num)> {
     let mut states: Vec<(i64, Num)> = vec![(0, Num::new(1, 1))];
-    for seg in &plan.segments {
-        let minimum_chill_multiplier: i64 = max(seg.freeze_span - seg.chill_time_max, 1);
-        let chill_time_min = max(seg.chill_time_max - seg.freeze_span + 1, 0);
-        let mut next_states: HashMap<i64, Num> = HashMap::new();
-        for (chill_sum, weight) in states {
-            for chill_time in chill_time_min..=seg.chill_time_max {
-                let chill_weight =
-                    if seg.freeze_span == 1 {Num::new(1, 1)}
-                    else {Num::new(if chill_time == chill_time_min {minimum_chill_multiplier} else {1}, seg.freeze_span)};
-                let entry = next_states.entry(chill_sum + chill_time).or_insert(Num::new(0, 1));
-                *entry += weight * chill_weight;
-            }
-        }
-        states = next_states.into_iter().collect();
-    }
+    for seg in &plan.segments {states = convolve_chill_states(&states, seg);}
     states
 }
 
@@ -219,26 +232,43 @@ fn calculate_animation(data: &ZombieData, ice_times: &[i64], time: i64, animatio
         phase += l * 2 * plan.initial_norm_time;
 
         let mut states: Vec<(Num, Num, Num, Num)> = vec![(phase, shift_min, shift_max, Num::new(1, 1))];
-        for seg in &plan.segments {
-            // 举例：chill_time_max = 100 时，实际减速时间取到最小值 0 的概率是 101/201 (冰 500-600cs)，是取到其他数值的 101 倍
-            let minimum_chill_multiplier = max(seg.freeze_span - seg.chill_time_max, 1);
-            let chill_time_base = max(seg.chill_time_max - seg.freeze_span + 1, 0);
+        let mut seg_index = 0usize;
+        while seg_index < plan.segments.len() {
+            let mut run_states: Vec<(i64, Num)> = vec![(0, Num::new(1, 1))];
+            let mut tail_norm_after: i64 = 0;
+            while seg_index < plan.segments.len() {
+                let seg = &plan.segments[seg_index];
+                run_states = convolve_chill_states(&run_states, seg);
+                seg_index += 1;
+                if seg.norm_time_after > 0 {
+                    tail_norm_after = seg.norm_time_after;
+                    break;
+                }
+            }
+            run_states.sort_unstable_by_key(|(run_chill, _)| *run_chill);
+
             let mut next_states: Vec<(Num, Num, Num, Num)> = Vec::new();
             for (phase, shift_min, shift_max, weight) in states {
+                if run_states.is_empty() {
+                    continue;
+                }
+                let (chill_time_base, _) = run_states[0];
                 let mut shift_min_cur = shift_min + total_shift(&shift_l, chill_time_base, l, phase);
                 let mut shift_max_cur = shift_max + total_shift(&shift_r, chill_time_base, l, phase);
                 let mut phase_cur = phase + l * chill_time_base;
-                for chill_time in chill_time_base..=seg.chill_time_max {
-                    let chill_weight = 
-                        if seg.freeze_span == 1 {Num::new(1, 1)} 
-                        else {Num::new(if chill_time == chill_time_base {minimum_chill_multiplier} else {1}, seg.freeze_span)};
-                    let shift_min_next = shift_min_cur + total_shift(&shift_norm_l, seg.norm_time_after, l * 2, phase_cur);
-                    let shift_max_next = shift_max_cur + total_shift(&shift_norm_r, seg.norm_time_after, l * 2, phase_cur);
-                    let phase_next = phase_cur + l * 2 * seg.norm_time_after;
-                    next_states.push((phase_next, shift_min_next, shift_max_next, weight * chill_weight));
-                    shift_min_cur += shift_l[phase_cur.to_integer() as usize % animation.len()];
-                    shift_max_cur += shift_r[phase_cur.to_integer() as usize % animation.len()];
-                    phase_cur += l;
+                let mut prev_chill = chill_time_base;
+                for (run_chill, run_weight) in &run_states {
+                    let delta = *run_chill - prev_chill;
+                    for _ in 0..delta {
+                        shift_min_cur += shift_l[phase_cur.to_integer() as usize % animation.len()];
+                        shift_max_cur += shift_r[phase_cur.to_integer() as usize % animation.len()];
+                        phase_cur += l;
+                    }
+                    let shift_min_next = shift_min_cur + total_shift(&shift_norm_l, tail_norm_after, l * 2, phase_cur);
+                    let shift_max_next = shift_max_cur + total_shift(&shift_norm_r, tail_norm_after, l * 2, phase_cur);
+                    let phase_next = phase_cur + l * 2 * tail_norm_after;
+                    next_states.push((phase_next, shift_min_next, shift_max_next, weight * *run_weight));
+                    prev_chill = *run_chill;
                 }
             }
             states = next_states;
