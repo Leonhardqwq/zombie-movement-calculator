@@ -3,6 +3,11 @@ use libm::erfc;
 use num_traits::ToPrimitive;
 use rayon::prelude::*;
 
+#[cfg(debug_assertions)]
+pub const MINMAX_ONLY_MODE: bool = true; // 调试模式
+#[cfg(not(debug_assertions))]
+pub const MINMAX_ONLY_MODE: bool = false;
+
 #[derive(Clone, Copy)]
 struct IceSegment {
     chill_time_max: i64,
@@ -17,7 +22,10 @@ struct TimePlan {
 
 // 输入按升序排列的冰时机，按“初始原速 + 每次冰后减速段与原速段”构建时间分段。
 fn calc_time(data: &ZombieData, ice_times: &[i64], time: i64) -> TimePlan {
-    let valid_ice_times: Vec<i64> = ice_times.iter().copied().filter(|&t| (1..=time).contains(&t)).collect();
+    let mut normalized_ice_times = ice_times.to_vec();
+    normalized_ice_times.sort_unstable();
+    normalized_ice_times.dedup();
+    let valid_ice_times: Vec<i64> = normalized_ice_times.into_iter().filter(|&t| (1..=time).contains(&t)).collect();
     if valid_ice_times.is_empty() || data.chill_immune {
         return TimePlan {initial_norm_time: time, segments: vec![],};
     }
@@ -47,6 +55,7 @@ fn get_segment_chill_states(seg: &IceSegment) -> Vec<(i64, Num)> {
     let chill_time_min = max(seg.chill_time_max - seg.freeze_span + 1, 0);
     let mut result = Vec::new();
     for chill_time in chill_time_min..=seg.chill_time_max {
+        if MINMAX_ONLY_MODE && chill_time != chill_time_min && chill_time != seg.chill_time_max {continue;}
         let chill_weight =
             if seg.freeze_span == 1 {Num::new(1, 1)}
             else {Num::new(if chill_time == chill_time_min {minimum_chill_multiplier} else {1}, seg.freeze_span)};
